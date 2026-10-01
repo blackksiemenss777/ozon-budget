@@ -1455,6 +1455,11 @@ if(!state.changeLocks||typeof state.changeLocks!=='object')state.changeLocks={};
 /* Ручные изменения менеджера хранятся отдельно от ежедневных импортов */
 if(!state.manualOverrides||typeof state.manualOverrides!=='object')state.manualOverrides={};
 if(!state.settings)state.settings={};
+/* Дополняем только отсутствующие настройки стандартными значениями.
+   Уже изменённые пользователем значения не трогаем. */
+for(const [k,v] of Object.entries(INITIAL_DATA.settings)){
+  if(!Number.isFinite(Number(state.settings[k])))state.settings[k]=v;
+}
 if(!Number.isFinite(Number(state.settings.minStockNoSalesStart)))state.settings.minStockNoSalesStart=10;
 if(!Number.isFinite(Number(state.settings.fbsStepFactor)))state.settings.fbsStepFactor=0.5;
 /* v41: единая шкала оборачиваемости.
@@ -1699,10 +1704,12 @@ function calcProduct(p){
  const appliedBudget=budget;
  const stockInfo=stockInfoFor(p,cur), fboStock=stockInfo.fbo, fbsStock=stockInfo.fbs, stock=stockInfo.total, fbsOnly=stockInfo.fbsOnly, profit=blank(cur?.profit)?0:n(cur.profit), vp=n(p.grossProfitUnit), markup=blank(p.markup)?null:n(p.markup), marker=String(p.marker||'').trim().toUpperCase(), manager=p.manager||cur?.manager||'';
  const rate=orders/days, prevRate=prevOrders/prevDays, orderDelta=(rate>0&&prevRate>0)?rate/prevRate-1:null;
- const drr=revenue>0?spend/revenue:0, turnover=rate>0?stock/rate:null;
+ const turnoverStock=fboStock>0?fboStock:fbsStock;
+ const drr=revenue>0?spend/revenue:0, turnover=rate>0?turnoverStock/rate:null;
  const decisionTurn=turnover;
  const fill=budget>0?spend/(budget/7*days):null;
  const turnZone=turnoverZone(decisionTurn,s);
+ const bigFbo=!fbsOnly&&fboStock>=n(s.bigStock,800);
  let target=n(s.targetDrr,.15);
  if(turnZone==='fast')target=(drr>0&&drr<n(s.targetDrr))?drr:n(s.targetDrr)*n(s.fastDrrFactor,.8);
  else if(turnZone==='slow')target=n(s.targetDrr)*(1+n(s.slowDrrBonus));
@@ -1774,7 +1781,12 @@ function calcProduct(p){
          action='РК НЕ НУЖНА';
          reason=`Без рекламы есть ${num(orders)} заказов за ${num(days)} дн. Остаток ${num(stock)} шт., оборачиваемость ${num(turnover,0)} дн. — товар продаётся нормально сам.`;
       } else {
-         rec=vpStart>0?clamp(vpStart,n(s.minBudget),n(s.maxBudget)):0;
+         let startRec=vpStart;
+         if(startRec>0&&!fbsOnly&&turnZone==='slow'){
+            const startStep=bigFbo?n(s.budgetUpAggressive):n(s.budgetUp);
+            startRec=roundStep(startRec*(1+startStep),n(s.budgetRound));
+         }
+         rec=startRec>0?clamp(startRec,n(s.minBudget),n(s.maxBudget)):0;
          action=vpStart>0?'РЕКОМЕНД. БЮДЖЕТ':'ПРОВЕРИТЬ ВП/ШТ';
          reason=vpStart>0
            ? `Реклама нужна: ${turnover===null?'нет продаж/нет оборачиваемости':'оборачиваемость '+num(turnover,0)+' дн.'} Остаток ${num(stock)} шт. Стартовый бюджет по ВП/шт ${rub(vp)} → ${rub(rec)}/нед.`
@@ -1788,10 +1800,10 @@ function calcProduct(p){
    else {let step=(orderDelta!==null&&orderDelta>=n(s.ordersGrowth))?n(s.budgetUpAggressive):(orderDelta!==null&&orderDelta<=n(s.ordersDecline)?n(s.budgetUp)/2:n(s.budgetUp));rec=clamp(roundStep(budget*(1+step),n(s.budgetRound)),n(s.minBudget),n(s.maxBudget));action=rec>budget*1.02?'ПОВЫСИТЬ':'ОСТАВИТЬ';reason=`Сезон: товар не успевает. Оборачиваемость ${num(decisionTurn,0)} дн., до конца сезона ${daysSeason} дн.`}
  } else if(turnZone==='fast'&&drr<=n(s.targetDrr)){
    rec=budget;action='ОСТАВИТЬ';reason=`БЫСТРАЯ зона: оборачиваемость ${num(decisionTurn,0)} дн. Товар и так продаётся быстро, лишний разгон не нужен. ДРР ${pct(drr)}.`
- } else if(drr<target-n(s.drrTolerance)){
+ } else if((turnZone==='slow'&&!fbsOnly&&drr<=target)||drr<target-n(s.drrTolerance)){
    const canUp=fill!==null&&fill>=n(s.budgetFillThreshold)&&(orderDelta===null||orderDelta>n(s.ordersDecline))&&turnZone!=='fast'&&turnZone!=='stop';
    if(canUp){
-      const step=turnZone==='slow'?n(s.budgetUpAggressive):n(s.budgetUp);
+      const step=(turnZone==='slow'&&bigFbo)?n(s.budgetUpAggressive):n(s.budgetUp);
       let candidate=roundStep(budget*(1+step),n(s.budgetRound));
       rec=econBudget>0?Math.min(econBudget,candidate):budget;
       action=rec>budget*1.02?'ПОВЫСИТЬ':'ОСТАВИТЬ';
